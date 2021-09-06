@@ -73,15 +73,16 @@ class ActNorm(AffineConstantFlow):
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.data_dep_init_done = False
+        # self.data_dep_init_done = False
+        self.register_buffer('data_dep_init_done', torch.zeros(1, dtype=torch.bool))
     
     def forward(self, x):
         # first batch is used for init
-        if not self.data_dep_init_done:
+        if not self.data_dep_init_done.item():
             assert self.s is not None and self.t is not None # for now
             self.s.data = (-torch.log(x.std(dim=0, keepdim=True))).detach()
             self.t.data = (-(x * torch.exp(self.s)).mean(dim=0, keepdim=True)).detach()
-            self.data_dep_init_done = True
+            self.data_dep_init_done = torch.ones(1, dtype=torch.bool)
         return super().forward(x)
 
 
@@ -217,14 +218,16 @@ class Invertible1x1Conv(nn.Module):
         self.dim = dim
         Q = torch.nn.init.orthogonal_(torch.randn(dim, dim))
         P, L, U = torch.lu_unpack(*Q.lu())
-        self.P = P # remains fixed during optimization
+        self.register_buffer('P', P)
+        self.P.cuda()
+        # self.P = P.cuda() # remains fixed during optimization
         self.L = nn.Parameter(L) # lower triangular portion
         self.S = nn.Parameter(U.diag()) # "crop out" the diagonal to its own parameter
         self.U = nn.Parameter(torch.triu(U, diagonal=1)) # "crop out" diagonal, stored in S
 
     def _assemble_W(self):
         """ assemble W from its pieces (P, L, U, S) """
-        L = torch.tril(self.L, diagonal=-1) + torch.diag(torch.ones(self.dim))
+        L = torch.tril(self.L, diagonal=-1) + torch.diag(torch.ones(self.dim).cuda())
         U = torch.triu(self.U, diagonal=1)
         W = self.P @ L @ (U + torch.diag(self.S))
         return W
@@ -253,7 +256,7 @@ class NormalizingFlow(nn.Module):
 
     def forward(self, x):
         m, _ = x.shape
-        log_det = torch.zeros(m)
+        log_det = torch.zeros(m).cuda()
         zs = [x]
         for flow in self.flows:
             x, ld = flow.forward(x)
@@ -263,7 +266,7 @@ class NormalizingFlow(nn.Module):
 
     def backward(self, z):
         m, _ = z.shape
-        log_det = torch.zeros(m)
+        log_det = torch.zeros(m).cuda()
         xs = [z]
         for flow in self.flows[::-1]:
             z, ld = flow.backward(z)
